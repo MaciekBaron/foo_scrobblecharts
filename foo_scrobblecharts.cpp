@@ -96,22 +96,29 @@ pfc::string8 getMainArtist(const pfc::list_base_const_t<metadb_handle_ptr> &data
 			artists[artist]++;
 		}
 	}
-	int maxCount = 0;
-	const char *maxArtist = 0;
-	std::map<const char*, int, strCmp>::iterator iter;
-	for (iter = artists.begin(); iter != artists.end(); iter++) {
-		if ((iter->second) > maxCount) {
-			maxCount = iter->second;
-			maxArtist = iter->first;
+	if (artists.size() == 0) {
+		db->database_unlock();
+		pfc::string8 retArtist("NO ARTIST");
+		return retArtist;
+	} else {
+
+		int maxCount = 0;
+		const char *maxArtist = 0;
+		std::map<const char*, int, strCmp>::iterator iter;
+		for (iter = artists.begin(); iter != artists.end(); iter++) {
+			if ((iter->second) > maxCount) {
+				maxCount = iter->second;
+				maxArtist = iter->first;
+			}
 		}
+		db->database_unlock();
+		pfc::string8 retArtist(maxArtist);
+		return retArtist;
 	}
-	db->database_unlock();
-	pfc::string8 retArtist(maxArtist);
-	return retArtist;
 }
 
 pfc::string8 getMainTitle(const pfc::list_base_const_t<metadb_handle_ptr> &data) {
-	std::map<const char*, int, strCmp> artists;
+	std::map<const char*, int, strCmp> titles;
 	int n = data.get_count();
 
 	static_api_ptr_t<metadb> db;
@@ -119,22 +126,29 @@ pfc::string8 getMainTitle(const pfc::list_base_const_t<metadb_handle_ptr> &data)
 	for (int i = 0; i < n; i++) {
 		const file_info *fileInfo;
 		if (data[i]->get_info_async_locked(fileInfo) && fileInfo->meta_exists("title")) {
-			const char *artist = fileInfo->meta_get("title", 0);
-			artists[artist]++;
+			const char *title = fileInfo->meta_get("title", 0);
+			titles[title]++;
 		}
 	}
-	int maxCount = 0;
-	const char *maxArtist = 0;
-	std::map<const char*, int, strCmp>::iterator iter;
-	for (iter = artists.begin(); iter != artists.end(); iter++) {
-		if ((iter->second) > maxCount) {
-			maxCount = iter->second;
-			maxArtist = iter->first;
+
+	if (titles.size() == 0) {
+		db->database_unlock();
+		pfc::string8 retArtist("NO TITLE");
+		return retArtist;
+	} else {
+		int maxCount = 0;
+		const char *maxTitle = 0;
+		std::map<const char*, int, strCmp>::iterator iter;
+		for (iter = titles.begin(); iter != titles.end(); iter++) {
+			if ((iter->second) > maxCount) {
+				maxCount = iter->second;
+				maxTitle = iter->first;
+			}
 		}
+		db->database_unlock();
+		pfc::string8 retArtist(maxTitle);
+		return retArtist;
 	}
-	db->database_unlock();
-	pfc::string8 retArtist(maxArtist);
-	return retArtist;
 }
 
 // database needs to be locked for this to work
