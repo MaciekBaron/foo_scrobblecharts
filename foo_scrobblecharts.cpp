@@ -1,10 +1,11 @@
-#define VERSION "0.2.3"
+#define VERSION "0.2.3b"
 
 #include "../_sdk/foobar2000/SDK/foobar2000.h"
 #include "../_sdk/foobar2000/helpers/helpers.h"
 #include "xmlParser.h"
 #include <map>
 #include <vector>
+#include <stack>
 #include "foo_scrobblecharts.h"
 #include <time.h>
 
@@ -44,10 +45,11 @@ Spezielle Felder für den playlist namen: %artist%
 */
 
 typedef std::multimap<int, pfc::string8, std::greater<int>> descMap_t;
+typedef std::multimap<int, std::stack<pfc::string8>, std::greater<int>> descMap_tt;
 
 DECLARE_COMPONENT_VERSION( "Last.fm Chart Player", VERSION,
 	"Downloads charts from last.fm and creates a playlist according to them\n"
-	"By Christian Fersch\n"
+	"By Christian Fersch, modified by Maciej Baron\n"
 	__DATE__ " - " __TIME__ );
 
 class FileNotFound : public pfc::exception {
@@ -91,6 +93,33 @@ pfc::string8 getMainArtist(const pfc::list_base_const_t<metadb_handle_ptr> &data
 		const file_info *fileInfo;
 		if (data[i]->get_info_async_locked(fileInfo) && fileInfo->meta_exists("artist")) {
 			const char *artist = fileInfo->meta_get("artist", 0);
+			artists[artist]++;
+		}
+	}
+	int maxCount = 0;
+	const char *maxArtist = 0;
+	std::map<const char*, int, strCmp>::iterator iter;
+	for (iter = artists.begin(); iter != artists.end(); iter++) {
+		if ((iter->second) > maxCount) {
+			maxCount = iter->second;
+			maxArtist = iter->first;
+		}
+	}
+	db->database_unlock();
+	pfc::string8 retArtist(maxArtist);
+	return retArtist;
+}
+
+pfc::string8 getMainTitle(const pfc::list_base_const_t<metadb_handle_ptr> &data) {
+	std::map<const char*, int, strCmp> artists;
+	int n = data.get_count();
+
+	static_api_ptr_t<metadb> db;
+	db->database_lock();
+	for (int i = 0; i < n; i++) {
+		const file_info *fileInfo;
+		if (data[i]->get_info_async_locked(fileInfo) && fileInfo->meta_exists("title")) {
+			const char *artist = fileInfo->meta_get("title", 0);
 			artists[artist]++;
 		}
 	}
@@ -296,6 +325,63 @@ descMap_t getSimilarArtistChart(pfc::string8 artist, abort_callback *abort = 0) 
 	  console::printf("%d: %s", iter->first, (const char*)iter->second);
 	  }*/
 	return artistList;
+}
+
+descMap_tt getSimilarTracks(pfc::string8 artist, pfc::string8 track, abort_callback *abort = 0) throw (pfc::exception) {
+	descMap_tt trackList;
+	pfc::string8 page;
+	pfc::string8 url;
+	pfc::string8 artistEnc;
+	pfc::string8 trackEnc;
+	pfc::urlEncode(artistEnc, artist);
+	pfc::urlEncode(trackEnc, track);
+
+	url << "http://ws.audioscrobbler.com/2.0/?method=track.getsimilar&artist=" << artistEnc << "&track=" << trackEnc << "&api_key=ff4339a10e7ed92e0a74afd1cd1b74b8";
+	getUrl(url, page, abort);
+
+	if (abort != 0) {
+		abort->check();
+	}
+	if (page.get_length() < 10) {
+		throw pfc::exception("Last.fm returned an empty page.\nThis is usually the result of a server overload. Try again later");
+	}
+	pfc::string8 lastFmArtist;
+	{
+		t_size pageWSize = pfc::stringcvt::estimate_utf8_to_wide(page, ~0);
+		wchar_t *pageW = new wchar_t[pageWSize];
+		pfc::stringcvt::convert_utf8_to_wide(pageW, pageWSize, page, ~0);
+		XMLNode lfmNode = XMLNode::parseString(pageW, L"lfm");
+		XMLNode rootNode = lfmNode.getChildNode(L"similartracks");
+		delete[] pageW;
+		pfc::stringcvt::string_utf8_from_wide lastFmArtistConverter (rootNode.getAttribute(L"artist"));
+		lastFmArtist = lastFmArtistConverter;
+		// console::printf("lastFmArtist: %s", lastFmArtist.get_ptr());
+
+		int trackListLength = rootNode.nChildNode(L"track");
+		int maxReach = -1;
+		for (int i = 0; i < trackListLength; i++) {
+			XMLNode trackNode = rootNode.getChildNode(L"track", i);
+			XMLNode nameNode = trackNode.getChildNode(L"name");
+			XMLNode artistNode = trackNode.getChildNode(L"artist");
+			XMLNode artistNameNode = artistNode.getChildNode(L"name");
+			if (nameNode.nText() != 1) {
+				throw pfc::exception("Data Feed is invalid. This is a Last.fm Server error.");
+			}
+			pfc::stringcvt::string_utf8_from_wide trackNameConverter (nameNode.getText());
+			pfc::stringcvt::string_utf8_from_wide artistNameConverter (artistNameNode.getText());
+			console::printf("Found: %s - %s", artistNameConverter.get_ptr(), trackNameConverter.get_ptr());
+			std::stack<pfc::string8> song;
+			song.push(trackNameConverter.get_ptr());
+			song.push(artistNameConverter.get_ptr());
+			trackList.insert(std::pair<int, std::stack<pfc::string8>>(i, song));
+		}
+	}
+	if (trackList.size() < 2) {
+		pfc::string8_fast msg(artist);
+		msg += "'s chart listing is empty";
+		throw pfc::exception(msg);
+	}
+	return trackList;
 }
 
 class ArtistSimilarPlaylistGenerator : public threaded_process_callback {
@@ -540,6 +626,118 @@ public:
 	}
 };
 
+
+class SimilarTracksPlaylistGenerator : public threaded_process_callback {
+private:
+	pfc::string8 artist;
+	pfc::string8 track;
+	pfc::list_t<metadb_handle_ptr> library;
+	pfc::list_t<metadb_handle_ptr> tracks;
+	bool success;
+public:
+	SimilarTracksPlaylistGenerator (const char *artist, const char *track) {
+		this->artist = artist;
+		this->track = track;
+		this->success = false;
+	}
+	virtual void on_init(HWND p_wnd) {
+		static_api_ptr_t<library_manager> lm;
+		lm->get_all_items(library);
+	}
+	virtual void run(threaded_process_status &p_status, abort_callback &p_abort) {
+		try {
+			p_status.set_item("Downloading similar tracks listing from Last.Fm...");
+			p_status.force_update();
+
+			descMap_tt trackList = getSimilarTracks(artist, track, &p_abort);
+			p_abort.check();
+			p_status.set_item("Generating Playlist...");
+			p_status.force_update();
+
+			descMap_tt::iterator tlIter;
+
+			std::map<const char*, pfc::list_t<metadb_handle_ptr>, strCmp>::iterator finder;
+
+			static_api_ptr_t<metadb> db;
+			db->database_lock();
+			for (tlIter = trackList.begin(); tlIter != trackList.end(); tlIter++) {
+				std::map<const char*, pfc::list_t<metadb_handle_ptr>, strCmp> artistData;
+				pfc::list_t<metadb_handle_ptr> dataSet;
+				pfc::string8 newTrackArtist = tlIter->second.top().toString();
+				pfc::string8 *trackArtist = &newTrackArtist;
+				tlIter->second.pop();
+				pfc::string8 newTrackTitle = tlIter->second.top().toString();
+				pfc::string8 *trackTitle = &newTrackTitle;
+
+				dataSet = library;
+				filterTracksByArtist(trackArtist->toString(), dataSet);
+				if (dataSet.get_size() > 0) {
+					artistData.insert(std::pair<const char*, pfc::list_t<metadb_handle_ptr>>(trackArtist->toString(), dataSet));
+				
+					//throw std::exception(trackArtist->toString());
+					if ((finder = artistData.find(*trackArtist)) != artistData.end()) {
+						dataSet = finder->second;
+					} else {
+						db->database_unlock();
+						throw std::exception("unawaited exception");
+					}
+					metadb_handle_ptr track = getTrackByTitle(*trackTitle, dataSet);
+					if (track != 0) {
+						tracks.add_item(track);
+					}
+				}
+			}
+			db->database_unlock();
+
+
+
+			if (tracks.get_count() < 2) {
+				throw pfc::exception("Did not find enough tracks to make a playlist");
+			}
+			success = true;
+			p_abort.check();
+		} catch (exception_aborted e) {
+			success = false;
+		} catch (pfc::exception &e) {
+			popup_message::g_show(e.what(), "foo_scrobblecharts: Error", popup_message::icon_error);
+		}
+	}
+	virtual void on_done(HWND p_wnd, bool p_was_aborted) {
+		if (!success) {
+			return;
+		}
+		static_api_ptr_t<playlist_manager> pm;
+		// const char *playlistName = artist;
+		const char *playlistName = "#SimilarTracks";
+		t_size playlist = pm->find_playlist(playlistName, ~0);
+		if (playlist != ~0) {
+			pm->playlist_undo_backup(playlist);
+			pm->playlist_clear(playlist);
+		} else {
+			playlist = pm->create_playlist(playlistName, ~0, ~0);
+		}
+		pm->playlist_add_items(playlist, tracks, bit_array_true());
+		pm->set_active_playlist(playlist);
+		pm->set_playing_playlist(playlist);
+		static_api_ptr_t<playback_control> pc;
+		pc->start();
+	}
+};
+
+void generateSimilarTracksPlaylist(const pfc::list_base_const_t<metadb_handle_ptr> &tracks) {
+	pfc::string8 artist = getMainArtist(tracks);
+	pfc::string8 ttitle = getMainTitle(tracks); 
+	if (artist.get_length() > 0) {
+		pfc::string8 title("Generating Similar Tracks Playlist for ");
+		title += ttitle;
+		service_ptr_t<threaded_process_callback> generator = new service_impl_t<SimilarTracksPlaylistGenerator>(artist, ttitle);
+		threaded_process::g_run_modeless(generator, threaded_process::flag_show_abort | threaded_process::flag_show_item, core_api::get_main_window(), title);
+	} else {
+		console::error("no Artist Information found");
+	}
+}
+
+
 void generateArtistPlaylist(const pfc::list_base_const_t<metadb_handle_ptr> &tracks) {
 	pfc::string8 artist = getMainArtist(tracks);
 	if (artist.get_length() > 0) {
@@ -679,7 +877,7 @@ class my_contextmenu : public contextmenu_item_simple {
 	virtual void context_command(unsigned p_index, const pfc::list_base_const_t<metadb_handle_ptr> &p_data, const GUID &p_caller) {
 		if (p_index == 0) {
 			if (p_data.get_count() > 0) {
-				generateArtistPlaylist(p_data);
+				generateSimilarTracksPlaylist(p_data);
 			}
 		} else if (p_index == 1) {
 			if (p_caller == contextmenu_item::caller_playlist) {
@@ -720,7 +918,7 @@ class my_contextmenu : public contextmenu_item_simple {
 	}
 	virtual bool get_item_description(unsigned p_index, pfc::string_base &p_out) {
 		if (p_index == 0) {
-			p_out = "Generates a playlist from the Artist's charts on Last.fm";
+			p_out = "Generates a playlist from similar tracks";
 		} else if (p_index == 1) {
 			p_out = "Sorts the tracks according to the Artist's charts on Last.fm";
 		} else if (p_index == 2) {
@@ -732,7 +930,7 @@ class my_contextmenu : public contextmenu_item_simple {
 	}
 	virtual void get_item_name(unsigned p_index, pfc::string_base &p_out) {
 		if (p_index == 0) {
-			p_out = "Artist Charts Playlist";
+			p_out = "Similar Tracks Playlist";
 		} else if (p_index == 1) {
 			p_out = "Sort by Artist Charts";
 		} else if (p_index == 2) {
@@ -743,14 +941,10 @@ class my_contextmenu : public contextmenu_item_simple {
 	}
 	virtual bool context_get_display(unsigned p_index, const pfc::list_base_const_t<metadb_handle_ptr> &p_data, pfc::string_base &p_out, unsigned &p_displayflags, const GUID &p_caller) {
 		if (p_index == 0) {
-			p_out = getMainArtist(p_data);
+			p_out = getMainTitle(p_data);
 			t_size len = p_out.get_length();
 			if (len > 0) {
-				if ((p_out.get_ptr())[len - 1] == 's') {
-					p_out.add_string("' Charts Playlist");
-				} else {
-					p_out.add_string("'s Charts Playlist");
-				}
+				p_out.add_string(" - similar tracks");
 			} else {
 				get_item_name(p_index, p_out);
 			}
