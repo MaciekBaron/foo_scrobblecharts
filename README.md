@@ -5,4 +5,4 @@ At the moment I've replaced the Artist Charts option as I'm still trying to figu
 Building This Project
 ----------------------
 
-The SDK is expected to be found in ../_sdk/foobar2000 and ../_sdk/pfc.
+The SDK is expected to be found in `../_sdk/foobar2000` and `../_sdk/pfc`.
